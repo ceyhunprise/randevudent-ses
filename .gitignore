@@ -1,0 +1,5 @@
+# Sunucuda üretilen gizli ayarlar ve hasta randevu verisi — asla GitHub'a yüklenmez
+.env
+veri/
+__pycache__/
+*.pyc

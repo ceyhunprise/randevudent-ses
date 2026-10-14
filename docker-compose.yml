@@ -1,0 +1,132 @@
+# RandevuDent — Türkiye'de barındırılan sesli asistan (deneme)
+# Başlatma: docker compose up -d --build   (kur.sh bunu senin yerine yapar)
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+x-host: &host
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  # Ses trafiği (WebRTC). UDP port aralığı için sunucu ağını doğrudan kullanır.
+  livekit:
+    image: livekit/livekit-server:latest
+    network_mode: host
+    command: --config /etc/livekit.yaml
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    restart: unless-stopped
+
+  # HTTPS (mikrofon izni için tarayıcı HTTPS ister). Sertifikayı otomatik alır.
+  caddy:
+    image: caddy:2
+    <<: *host
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-veri:/data
+    depends_on: [web]
+    restart: unless-stopped
+
+  # Test sayfası + erişim anahtarı
+  web:
+    build: ./web
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_PUBLIC_URL: wss://${DOMAIN}
+      TEST_SIFRESI: ${TEST_SIFRESI}
+    volumes:
+      - ./veri:/data:ro
+    restart: unless-stopped
+
+  # Beyin: açık dil modeli (vLLM). GPU belleğini ilk o ayırır.
+  llm:
+    image: vllm/vllm-openai:latest
+    <<: *gpu
+    ipc: host
+    command:
+      - --model=${LLM_MODEL}
+      - --served-model-name=${LLM_MODEL}
+      - --max-model-len=8192
+      - --gpu-memory-utilization=${LLM_GPU_ORANI}
+      - --enable-auto-tool-choice
+      - --tool-call-parser=hermes
+    volumes:
+      - hf-onbellek:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 80
+      start_period: 300s
+    restart: unless-stopped
+
+  # Kulak: konuşma → yazı (faster-whisper)
+  stt:
+    build: ./stt
+    <<: *gpu
+    environment:
+      STT_MODEL: ${STT_MODEL}
+    volumes:
+      - hf-onbellek:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    depends_on:
+      llm: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Ses: yazı → Türkçe konuşma (EMA-TTS)
+  tts:
+    build: ./tts
+    <<: *gpu
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    depends_on:
+      llm: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Ayla: konuşmayı yöneten ajan
+  agent:
+    build: ./agent
+    <<: *host
+    environment:
+      LIVEKIT_URL: ws://host.docker.internal:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LLM_MODEL: ${LLM_MODEL}
+      STT_MODEL: ${STT_MODEL}
+      KLINIK_ACIL_TELEFON: ${KLINIK_ACIL_TELEFON}
+      TZ: Europe/Istanbul
+    volumes:
+      - ./veri:/data
+    depends_on:
+      llm: { condition: service_healthy }
+      stt: { condition: service_healthy }
+      tts: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  hf-onbellek:
+  caddy-veri:

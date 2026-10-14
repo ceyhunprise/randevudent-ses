@@ -1,0 +1,8 @@
+{$DOMAIN} {
+	# LiveKit sinyal bağlantısı (WebSocket)
+	@livekit path /rtc*
+	reverse_proxy @livekit host.docker.internal:7880
+
+	# Test sayfası ve API
+	reverse_proxy web:8080
+}
